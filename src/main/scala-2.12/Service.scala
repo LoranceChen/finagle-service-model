@@ -122,11 +122,24 @@ class RequireAuthentication(authService: AuthService)
   }
 }
 
+object FutureCancelable {
+  def cancellable[T](f: Future[T])(customCode: => Unit): (() => Unit, Future[T]) = {
+    val p = Promise[T]
+    val first = Future firstCompletedOf Seq(p.future, f)
+    val cancellation: () => Unit = {
+      () =>
+        first.failed.foreach { case e => customCode}
+        p failure new Exception
+    }
+    (cancellation, first)
+  }
+}
+
 /**
   * this example apply a timeout and authentication
-  * - NOTE: service response is not the end , at thrift, it has a Builder to config detail action.Service and Filter is just a powerful
+  * - NOTE: service response is not the end , at thrift where has a Builder to config detail action.Service and Filter is just a powerful
   * work stream to handle logic with scalable ways.
-  * - consider filter a pre-deal actions to append message one filter by another, finally achieve service.
+  * - consider filter as a pre-deal actions to append message one filter by another, finally achieve service.
   */
 object Test extends App {
   //filters
@@ -154,17 +167,4 @@ object Test extends App {
   service(HttpReq())
 
   Thread.currentThread().join()
-}
-
-object FutureCancelable {
-  def cancellable[T](f: Future[T])(customCode: => Unit): (() => Unit, Future[T]) = {
-    val p = Promise[T]
-    val first = Future firstCompletedOf Seq(p.future, f)
-    val cancellation: () => Unit = {
-      () =>
-        first.failed.foreach { case e => customCode}
-        p failure new Exception
-    }
-    (cancellation, first)
-  }
 }
