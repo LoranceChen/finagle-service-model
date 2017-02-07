@@ -1,5 +1,7 @@
-import scala.concurrent.{Future, Promise, blocking}
-import scala.concurrent.duration.Duration
+import java.util.concurrent.TimeUnit
+
+import scala.concurrent.{CancellationException, ExecutionContext, Future, Promise, blocking}
+import scala.concurrent.duration.{Duration, TimeUnit}
 import scala.util.control.NonFatal
 import scala.concurrent.ExecutionContext.Implicits.global
 
@@ -33,6 +35,7 @@ trait Filter[-ReqIn, +RepOut, +ReqOut, -RepIn] extends ((ReqIn, Module[ReqOut, R
       val mdl: Module[ReqOut, RepIn] = new Module[ReqOut, RepIn] {
         override def apply(v1: ReqOut) = {
           try {
+            println("andthen filter")
             next(v1, module)
           } catch {
             case NonFatal(e) => Future.failed(e)
@@ -44,6 +47,7 @@ trait Filter[-ReqIn, +RepOut, +ReqOut, -RepIn] extends ((ReqIn, Module[ReqOut, R
   }
 
   def andThen(module: Module[ReqOut, RepIn]): Module[ReqIn, RepOut] = {
+    println("andthen module")
     new Module[ReqIn, RepOut] {
       def apply(request: ReqIn) = Filter.this.apply(request, module)
     }
@@ -58,12 +62,20 @@ class TimeoutFilter[Req, Rep]( exception: TimeOutException,
 {
 
   def apply(request: Req, service: Module[Req, Rep]): Future[Rep] = {
-    val res = service(request)
-
+    println("Timeout filter apply")
+    val (cancelHodler,res) = FutureCancelable.cancellable(service(request))(println("canceled"))
+    res.foreach(x =>
+      println("TimeoutFilter not stop service completed")
+    )
     //todo put Timeout Future to TimerTask which only use one thread.
     new FutureEx(res).withTimeout(timeout).recover{
-      case exception @ (_: FutureTimeoutException | _: FutureTimeoutNotOccur) =>
-        ???
+      case exp @ (_: FutureTimeoutException | _: FutureTimeoutNotOccur) =>
+        println("Timeout filter record timeout")
+        cancelHodler()
+        throw exception
+      case _ =>
+        println("other throw")
+        throw new Exception("other")
     }
   }
 
@@ -76,8 +88,10 @@ class TimeoutFilter[Req, Rep]( exception: TimeOutException,
       Future {
         blocking(Thread.sleep(ms))
         if(!f.isCompleted) {
+          println("FutureTimeoutException")
           p.tryFailure(new FutureTimeoutException)
         } else {
+          println("FutureTimeoutNotOccur")
           p.tryFailure(new FutureTimeoutNotOccur)
         }
       }
@@ -86,11 +100,15 @@ class TimeoutFilter[Req, Rep]( exception: TimeOutException,
 
     def withTimeout(duration: Duration): Future[T] = withTimeout(duration.toMillis)
   }
-
 }
 
 case class AuthService(rst: String) {
-  def auth(req: HttpReq): Future[String] = ??? //result can be other data type
+  def auth(req: HttpReq): Future[String] = { //result can be other data type
+    Future({
+      Thread.sleep(5000)
+      if(rst == "OK") "OK" else "Fail"
+    })
+  }
 }
 
 case class HttpReq()
@@ -103,28 +121,59 @@ class RequireAuthentication(authService: AuthService)
              req: HttpReq,
              service: Module[AuthHttpReq, HttpRsp]
            ) = {
+    println("authen service apply")
     authService.auth(req) flatMap {
       case "OK" =>
+        println("authen service ok")
         service(AuthHttpReq("OK"))
       case ar =>
+        println("authen service fail")
         Future.failed(
           new Exception())
     }
   }
 }
 
-trait Test {
-  val s: Filter[HttpReq, HttpRsp, HttpReq, HttpRsp] = new TimeoutFilter[HttpReq, HttpRsp](new TimeOutException(), Duration.apply(""))
-  val ss: Filter[HttpReq, HttpRsp, AuthHttpReq, HttpRsp] = new RequireAuthentication(AuthService("OK"))
-  val authFilter: Filter[HttpReq, HttpRsp, AuthHttpReq, HttpRsp] = ???
-  def timeoutfilter[Req, Rep]: Filter[Req, Rep, Req, Rep] = ???
-  val serviceRequiringAuth: Module[AuthHttpReq, HttpRsp]
+/**
+  * this example apply a timeout worked, authentication is success
+  */
+object Test extends App {
+  //filters
+  lazy val timeoutFilter: Filter[HttpReq, HttpRsp, HttpReq, HttpRsp] = new TimeoutFilter[HttpReq, HttpRsp](new TimeOutException(), Duration(1, TimeUnit.SECONDS))
+  lazy val authFilter: Filter[HttpReq, HttpRsp, AuthHttpReq, HttpRsp] = new RequireAuthentication(AuthService("OK"))
 
-  //combine filters
-  val authenticateAndTimedOut: Filter[HttpReq, HttpRsp, AuthHttpReq, HttpRsp] =
-    s.andThen(authFilter)
+  //service
+  lazy val serviceRequiringAuth: Module[AuthHttpReq, HttpRsp] = new Module[AuthHttpReq, HttpRsp] {
+    override def apply(v1: AuthHttpReq): Future[HttpRsp] =
+      v1 match {
+      case AuthHttpReq("OK") =>
+        println("authen pass")
+        Future.successful(HttpRsp())
+      case _ =>
+        println("authen failed")
+        Future.failed(new Exception("authen fail"))
+    }
+  }
 
-  //run service
-  val authenticatedTimedOutService: Module[HttpReq, HttpRsp] =
-    authenticateAndTimedOut andThen serviceRequiringAuth
+  //create service
+  val service = timeoutFilter andThen
+                authFilter andThen
+                serviceRequiringAuth
+
+  service(HttpReq())
+
+  Thread.currentThread().join()
+}
+
+object FutureCancelable {
+  def cancellable[T](f: Future[T])(customCode: => Unit): (() => Unit, Future[T]) = {
+    val p = Promise[T]
+    val first = Future firstCompletedOf Seq(p.future, f)
+    val cancellation: () => Unit = {
+      () =>
+        first.failed.foreach { case e => customCode}
+        p failure new Exception
+    }
+    (cancellation, first)
+  }
 }
