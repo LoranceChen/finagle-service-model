@@ -1,7 +1,7 @@
 import java.util.concurrent.TimeUnit
 
-import scala.concurrent.{CancellationException, ExecutionContext, Future, Promise, blocking}
-import scala.concurrent.duration.{Duration, TimeUnit}
+import scala.concurrent.{Future, Promise, blocking}
+import scala.concurrent.duration.Duration
 import scala.util.control.NonFatal
 import scala.concurrent.ExecutionContext.Implicits.global
 
@@ -10,21 +10,8 @@ import scala.concurrent.ExecutionContext.Implicits.global
   */
 trait Module[-Req, +Rsp] extends (Req => Future[Rsp])
 
-/**
-  *           (*   Service   *)
-  * [ReqIn -> (ReqOut -> RepIn) -> RepOut]
-  *
-  */
 trait Filter[-ReqIn, +RepOut, +ReqOut, -RepIn] extends ((ReqIn, Module[ReqOut, RepIn]) => Future[RepOut]) {
   /**
-    * final def andThen(next: ThriftFilter) = new ThriftFilter {
-    override def apply[T, Rep](
-      request: ThriftRequest[T],
-      svc: Service[ThriftRequest[T], Rep]
-    ): Future[Rep] = self.apply(request, next.toFilter[T, Rep].andThen(svc))
-  }
-
-    *
     * @return
     *           (*   Service   *)
     * [ReqIn -> (Req2 -> Rep2) -> RepOut]
@@ -105,6 +92,7 @@ class TimeoutFilter[Req, Rep]( exception: TimeOutException,
 case class AuthService(rst: String) {
   def auth(req: HttpReq): Future[String] = { //result can be other data type
     Future({
+      println("service/module")
       Thread.sleep(5000)
       if(rst == "OK") "OK" else "Fail"
     })
@@ -135,7 +123,10 @@ class RequireAuthentication(authService: AuthService)
 }
 
 /**
-  * this example apply a timeout worked, authentication is success
+  * this example apply a timeout and authentication
+  * - NOTE: service response is not the end , at thrift, it has a Builder to config detail action.Service and Filter is just a powerful
+  * work stream to handle logic with scalable ways.
+  * - consider filter a pre-deal actions to append message one filter by another, finally achieve service.
   */
 object Test extends App {
   //filters
